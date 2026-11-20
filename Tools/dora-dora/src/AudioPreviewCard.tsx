@@ -94,8 +94,7 @@ export default function AudioPreviewCard(props: {
 			document.removeEventListener("visibilitychange", pauseWhenHidden);
 			if (audio !== null) {
 				audio.pause();
-				audio.removeAttribute("src");
-				audio.load();
+				lastSrcRef.current = "";
 			}
 		};
 	}, []);

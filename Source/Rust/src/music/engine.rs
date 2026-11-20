@@ -2723,6 +2723,17 @@ fn resolve_score(definition: &Definition) -> Result<(Song, Effects, i64), String
 				end: beat_to_seconds(score, beat_unit, end),
 			});
 		}
+		// Sustain is a single switch per track, so overlapping intervals form one press.
+		pedals.sort_by(|a, b| a.start.total_cmp(&b.start));
+		let mut merged_pedals: Vec<Pedal> = Vec::with_capacity(pedals.len());
+		for pedal in pedals {
+			match merged_pedals.last_mut() {
+				Some(previous) if pedal.start <= previous.end => {
+					previous.end = previous.end.max(pedal.end);
+				}
+				_ => merged_pedals.push(pedal),
+			}
+		}
 		tracks.push(Track {
 			program: voice.program(),
 			bank: voice.bank(),
@@ -2735,7 +2746,7 @@ fn resolve_score(definition: &Definition) -> Result<(Song, Effects, i64), String
 			chorus_direction: 1.0,
 			role,
 			notes,
-			pedals,
+			pedals: merged_pedals,
 		});
 	}
 	if note_count == 0 {
@@ -3431,8 +3442,12 @@ fn create_track_renderer(
 		.map(release_seconds)
 		.unwrap_or(0.0);
 	for note in track.notes {
+		let start = seconds_to_sample(note.start, sample_rate, total_frames);
+		if start >= total_frames {
+			continue;
+		}
 		events.push(Event {
-			sample: seconds_to_sample(note.start, sample_rate, total_frames),
+			sample: start,
 			kind: EventKind::NoteOn,
 			data1: note.key,
 			data2: note.velocity,
@@ -3442,7 +3457,7 @@ fn create_track_renderer(
 			.min(((note.end - note.start).max(0.0) * 0.45) as f32)
 			* sample_rate as f32) as u64;
 		events.push(Event {
-			sample: note_end.saturating_sub(release),
+			sample: note_end.saturating_sub(release).max(start + 1),
 			kind: EventKind::NoteOff,
 			data1: note.key,
 			data2: 0,
@@ -3450,14 +3465,18 @@ fn create_track_renderer(
 	}
 	if !builtin {
 		for pedal in track.pedals {
+			let start = seconds_to_sample(pedal.start, sample_rate, total_frames);
+			if start >= total_frames {
+				continue;
+			}
 			events.push(Event {
-				sample: seconds_to_sample(pedal.start, sample_rate, total_frames),
+				sample: start,
 				kind: EventKind::Pedal,
 				data1: 64,
 				data2: 127,
 			});
 			events.push(Event {
-				sample: seconds_to_sample(pedal.end, sample_rate, total_frames),
+				sample: seconds_to_sample(pedal.end, sample_rate, total_frames).max(start + 1),
 				kind: EventKind::Pedal,
 				data1: 64,
 				data2: 0,
