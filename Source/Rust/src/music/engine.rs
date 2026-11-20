@@ -2532,7 +2532,7 @@ fn beat_to_seconds(score: &ScoreDefinition, beat_unit: u8, beat: f64) -> f64 {
 	let mut seconds = 0.0;
 	let mut cursor = 0.0;
 	let mut bpm = score.bpm;
-	let unit_scale = beat_unit as f64 / 4.0;
+	let unit_scale = 4.0 / beat_unit as f64;
 	let mut changes = score.tempo_changes.clone();
 	changes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
 	for change in changes {
@@ -3739,7 +3739,7 @@ struct MidiEvent {
 }
 
 fn seconds_to_beat(song: &Song, seconds: f64) -> f64 {
-	let unit_scale = song.beat_unit as f64 / 4.0;
+	let unit_scale = 4.0 / song.beat_unit as f64;
 	let mut elapsed = 0.0;
 	let mut beat = 0.0;
 	let mut bpm = song.bpm;
@@ -3772,7 +3772,7 @@ fn midi_bytes(song: &Song) -> Vec<u8> {
 	let ticks_per_quarter = 480u64;
 	let ticks_per_beat = ticks_per_quarter * 4 / song.beat_unit as u64;
 	let mut events = Vec::new();
-	let tempo = |bpm: f64| (60_000_000.0 * song.beat_unit as f64 / 4.0 / bpm).floor() as u32;
+	let tempo = |bpm: f64| (60_000_000.0 / bpm).floor() as u32;
 	let initial_tempo = tempo(song.bpm);
 	events.push(MidiEvent {
 		tick: 0,
@@ -3813,6 +3813,9 @@ fn midi_bytes(song: &Song) -> Vec<u8> {
 		});
 	}
 	for (track_index, track) in song.tracks.iter().enumerate() {
+		if track.volume == 0.0 {
+			continue;
+		}
 		let channel = if track.percussion {
 			9
 		} else {
@@ -3822,6 +3825,13 @@ fn midi_bytes(song: &Song) -> Vec<u8> {
 			}
 			channel
 		};
+		if !track.percussion && track.bank != 0 {
+			events.push(MidiEvent {
+				tick: 0,
+				order: -2,
+				data: vec![0xb0 + channel, 0, track.bank as u8],
+			});
+		}
 		events.push(MidiEvent {
 			tick: 0,
 			order: -2,
@@ -3848,7 +3858,8 @@ fn midi_bytes(song: &Song) -> Vec<u8> {
 		}
 		for pedal in &track.pedals {
 			let start = (seconds_to_beat(song, pedal.start) * ticks_per_beat as f64).round() as u64;
-			let end = (seconds_to_beat(song, pedal.end) * ticks_per_beat as f64).round() as u64;
+			let end = ((seconds_to_beat(song, pedal.end) * ticks_per_beat as f64).round() as u64)
+				.max(start + 1);
 			events.push(MidiEvent {
 				tick: start,
 				order: -1,
@@ -3869,7 +3880,9 @@ fn midi_bytes(song: &Song) -> Vec<u8> {
 		track_data.extend(event.data);
 		last_tick = event.tick;
 	}
-	track_data.extend([0, 0xff, 0x2f, 0]);
+	let score_end = song.bars as u64 * song.beats_per_bar as u64 * ticks_per_beat;
+	track_data.extend(variable_length(score_end.saturating_sub(last_tick)));
+	track_data.extend([0xff, 0x2f, 0]);
 	let mut result = Vec::new();
 	result.extend(b"MThd");
 	result.extend(6u32.to_be_bytes());
@@ -4761,6 +4774,38 @@ mod tests {
 		assert_eq!(note_name_to_midi("F#4"), Some(66));
 		assert_eq!(note_name_to_midi("Bb3"), Some(58));
 		assert_eq!(note_name_to_midi("H4"), None);
+	}
+
+	#[test]
+	fn midi_export_preserves_score_settings() {
+		let definition: Definition = serde_json::from_str(
+			r#"{
+				"output": "music.ogg",
+				"synth": {},
+				"score": {
+					"bpm": 120, "beatUnit": 8, "bars": 2,
+					"tracks": [
+						{
+							"preset": {"bank": 2, "program": 3},
+							"notes": [{"pitch": "C4", "start": 0, "duration": 1}],
+							"pedal": [{"start": 0, "duration": 0.001}]
+						},
+						{
+							"instrument": "piano", "volume": 0,
+							"notes": [{"pitch": "D4", "start": 0, "duration": 1}]
+						}
+					]
+				}
+			}"#,
+		)
+		.unwrap();
+		let (song, _, _) = resolve_score(&definition).unwrap();
+		let midi = midi_bytes(&song);
+		assert_eq!(&midi[22..29], &[0, 0xff, 0x51, 3, 0x07, 0xa1, 0x20]);
+		assert!(midi.windows(7).any(|bytes| bytes == [0, 0xb0, 0, 2, 0, 0xc0, 3]));
+		assert!(!midi.windows(2).any(|bytes| bytes == [0x91, 62]));
+		assert!(midi.windows(4).any(|bytes| bytes == [1, 0xb0, 64, 0]));
+		assert!(midi.ends_with(&[0x8d, 0x10, 0xff, 0x2f, 0]));
 	}
 
 	#[test]
